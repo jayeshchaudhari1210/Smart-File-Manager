@@ -7,13 +7,16 @@ from functools import partial
 from sys import platform
 import shutil
 import threading
+import subprocess
+from send2trash import send2trash
+from fileops import duplicate_candidates, same_content
 
 from PIL import Image, ImageTk
 
 import ttkbootstrap as ttk
-from ttkbootstrap.tooltip import ToolTip
-from ttkbootstrap.dialogs.dialogs import Messagebox
-from ttkbootstrap.dialogs.dialogs import Querybox
+from ttkbootstrap import ToolTip
+from ttkbootstrap.dialogs import Messagebox
+from ttkbootstrap.dialogs import Querybox
 
 import ext
 import json
@@ -43,9 +46,9 @@ def checkPlatform():
             chr(x) + ":" for x in range(65, 91) if os.path.exists(chr(x) + ":")
         ]  # 65-91 -> search for drives A-Z
         currDrive = available_drives[0]  # current selected drive
-    elif platform == "linux":
-        available_drives = "/"
-        currDrive = available_drives
+    elif platform in ("linux", "darwin"):
+        available_drives = ["/"]
+        currDrive = "/"
  
 def createWindow():
     # root = tk.Tk()
@@ -56,7 +59,7 @@ def createWindow():
     root.iconphoto(False, tk.PhotoImage(file=file_path + "icon.png"))
     return root
 
-def refresh(queryNames):
+def refresh(queryNames=None):
     global fileNames, folderIcon, fileIcon, items, cwdLabel, footer
     # Refresh Header
     cwdLabel.config(text=" " + os.getcwd())
@@ -64,7 +67,7 @@ def refresh(queryNames):
 
     # Refresh Browse
     fileSizesSum = 0
-    if queryNames:  # if user gave query and pressed enter
+    if queryNames is not None:  # An empty search result must stay empty
         fileNames = queryNames
     else:
         fileNames = os.listdir(os.getcwd())
@@ -85,7 +88,7 @@ def refresh(queryNames):
         try:
             found = False
             for file in tag_files:
-                if file['file_name'] == os.getcwd() + "\\" + fileNames[i]:
+                if file['file_name'] == os.path.join(os.getcwd(), fileNames[i]):
                     found = True
                     tag_type = file['tag_type']
             if found:
@@ -156,20 +159,20 @@ def refresh(queryNames):
     # --Refresh Footer
 
 def wrap_refresh(event):  # wrapper for F5 bind
-    refresh([])
+    refresh()
 
 
 def previous():
     global lastDirectory
     lastDirectory = os.getcwd()
     os.chdir("../")
-    refresh([])
+    refresh()
 
 
 def next():
     try:
         os.chdir(lastDirectory)
-        refresh([])
+        refresh()
     except:
         return
 
@@ -190,8 +193,11 @@ def onDoubleClick(event=None):
         ):  # if file is directory, open directory else open file
             os.chdir(newPath)
         else:
-            os.startfile(newPath)
-        refresh([])
+            if platform == "win32":
+                os.startfile(newPath)
+            else:
+                subprocess.Popen(["open" if platform == "darwin" else "xdg-open", newPath])
+        refresh()
     except:
         newPath = newPath.replace(tempName, "")
         os.chdir("../")
@@ -274,7 +280,7 @@ def create_widgets(window):
     )
     refreshButton = ttk.Button(
         headerFrame,
-        command=partial(refresh, []),
+        command=refresh,
         image=refreshIcon,
         bootstyle="light",
     )
@@ -406,7 +412,7 @@ def create_widgets(window):
         label="Refresh",
         image=refresh_photo,
         compound="left",
-        command=partial(refresh, []),
+        command=refresh,
     )
     # --Right click menu
 
@@ -704,7 +710,7 @@ def rename_popup():
             name = Querybox.get_string(prompt="Name: ", title="Rename")
             old = os.getcwd() + "/" + selectedItem
             os.rename(old, name)
-            refresh([])
+            refresh()
         except:
             pass
     else:
@@ -716,7 +722,7 @@ def tag_popup(tag_type):
     global items
     if items.focus() != "":
         try:
-            selected = os.getcwd() + "\\" + selectedItem
+            selected = os.path.join(os.getcwd(), selectedItem)
             found=False
             for file in tag_files:
                 if file['file_name'] == selected:
@@ -728,7 +734,7 @@ def tag_popup(tag_type):
                 new_item['tag_type'] = tag_type
                 tag_files.append(new_item)
                 update_tag()
-                refresh([])
+                refresh()
         except:
             pass
     else:
@@ -740,7 +746,7 @@ def untag_popup():
     global items
     if items.focus() != "":
         try:
-            selected = os.getcwd() + "\\" + selectedItem
+            selected = os.path.join(os.getcwd(), selectedItem)
             found=False
             for file in tag_files:
                 if file['file_name'] == selected:
@@ -749,7 +755,7 @@ def untag_popup():
             if found:
                 tag_files.remove(founditem)
                 update_tag()
-                refresh([])
+                refresh()
         except:
             pass
     else:
@@ -813,7 +819,7 @@ def new_file_popup():
         try:
             f = open(os.getcwd() + "/" + name, "x")
             f.close()
-            refresh([])
+            refresh()
         except:
             pass
 
@@ -823,7 +829,7 @@ def new_dir_popup():
     if name != "":
         try:
             os.mkdir(os.getcwd() + "/" + name)
-            refresh([])
+            refresh()
         except:
             pass
 
@@ -847,58 +853,57 @@ def wrap_paste(event):  # wrapper for ctrl+v keybinds
 
 
 def paste():
-    global src
-    dest = os.getcwd() + "/"
-    if not os.path.isdir(src) and src != "":
+    if not src:
+        return
+    source = src
+    destination = os.path.join(os.getcwd(), os.path.basename(source))
+    if os.path.exists(destination):
+        Messagebox.show_info(message="Destination already exists. Rename it before copying.", title="Copy not started")
+        return
+    errors = []
+    def worker():
         try:
-            t1 = threading.Thread(
-                target=shutil.copy2, args=(src, dest)
-            )  # use threads so gui does not hang on large file copy
-            t2 = threading.Thread(target=paste_popup, args=([t1]))
-            t1.start()
-            t2.start()
-        except:
-            pass
-    elif os.path.isdir(src) and src != "":
-        try:
-            new_dest_dir = os.path.join(dest, os.path.basename(src))
-            os.makedirs(new_dest_dir)
-            t1 = threading.Thread(  # use threads so gui does not hang on large directory copy
-                target=shutil.copytree,
-                args=(src, new_dest_dir, False, None, shutil.copy2, False, True),
-            )
-            t2 = threading.Thread(target=paste_popup, args=([t1]))
-            t1.start()
-            t2.start()
-        except:
-            pass
+            if os.path.isdir(source):
+                shutil.copytree(source, destination)
+            else:
+                shutil.copy2(source, destination)
+        except OSError as error:
+            errors.append(str(error))
+    thread = threading.Thread(target=worker)
+    thread.start()
+    paste_popup(thread, errors)
 
 
-def paste_popup(t1):
+def paste_popup(thread, errors=None):
+    errors = errors if errors is not None else []
     top = ttk.Toplevel(title="Progress")
     top.geometry("250x50")
     top.resizable(False, False)
-
-    gauge = ttk.Floodgauge(
-        top, bootstyle="success", mode="indeterminate", text="Copying files.."
-    )
+    gauge = ttk.Floodgauge(top, bootstyle="success", mode="indeterminate", text="Copying files..")
     gauge.pack(fill=tk.BOTH, expand=tk.YES)
     gauge.start()
-    t1.join()
-    refresh([])
-    top.destroy()
+    def poll():
+        if thread.is_alive():
+            top.after(100, poll)
+            return
+        gauge.stop()
+        top.destroy()
+        refresh()
+        if errors:
+            Messagebox.show_error(message=errors[0], title="Copy failed")
+    top.after(100, poll)
 
 
 def del_file_popup():
     global items
     if items.focus() != "":  # if there is a focused item
         answer = Messagebox.yesno(
-            message="Are you sure?\nThis file/directory will be deleted permanently.",
+            message="Are you sure?\nThis file/directory will be moved to Trash.",
             alert=True,
         )
         if answer == "Yes":
             del_file(None)
-            refresh([])
+            refresh()
         else:
             return
     else:
@@ -907,28 +912,21 @@ def del_file_popup():
         )
 
 def del_dup_popup():
-    dup_items = []
-    fileNames = os.listdir(os.getcwd())
-    for name1 in fileNames:
-        for name2 in fileNames:
-            for postfix in [' - Copy', ' - Copy (2)', ' - Copy (3)', ' - Copy (4)', ' - Copy (5)', ' - Copy (6)', ' - Copy (7)', ' - Copy (8)', ' - Copy (9)', ' - Copy (10)'
-                            , ' (1)', ' (2)', ' (3)', ' (4)', ' (5)', ' (6)', ' (7)', ' (8)', ' (9)', ' (10)']:
-                if name1.split('.', maxsplit=1)[0] == name2.split('.', maxsplit=1)[0] + postfix:
-                    if name1 not in dup_items:
-                        dup_items.append(name1)
-    if dup_items:
-        for dup_item in dup_items:
-            answer = Messagebox.yesno(
-                message=f"Are you sure?\n{dup_item} will be deleted permanently.",
-                alert=True,
-            )
+    try:
+        pairs = duplicate_candidates(os.getcwd())
+        for candidate, original in pairs:
+            answer = Messagebox.yesno(message=f"Same content as {original.name}.\nMove {candidate.name} to Trash?", alert=True)
             if answer == "Yes":
-                del_file(os.getcwd() + "/" + dup_item)
-            refresh([])
-    else:
-        Messagebox.show_info(
-            message="There is no duplicate file or directory.", title="Info"
-        )
+                if same_content(candidate, original):
+                    del_file(str(candidate))
+                else:
+                    Messagebox.show_info(message="The files changed; skipping this candidate.", title="Comparison changed")
+        if not pairs:
+            Messagebox.show_info(message="No content-identical duplicate files found.", title="Info")
+        refresh()
+    except OSError as error:
+        Messagebox.show_error(message=str(error), title="Unable to compare files")
+
 
 def del_tag_popup(del_upto):
     if tag_files:
@@ -943,36 +941,37 @@ def del_tag_popup(del_upto):
             delta = timedelta(days=7)    
         elif del_upto == "Month":
             delta = timedelta(days=30)    
-        for tag_item in tag_files:
+        for tag_item in list(tag_files):
             del_upto_date = datetime.strptime(tag_item['tag_date'],date_format)
             if datetime.now() >= del_upto_date + delta:
                 f_n = tag_item["file_name"]
                 answer = Messagebox.yesno(
-                    message=f"Are you sure?\n{f_n} will be deleted permanently.",
+                    message=f"Are you sure?\n{f_n} will be moved to Trash.",
                     alert=True,
                 )
                 if answer == "Yes":
-                    del_file(f_n)
-                    tag_files.remove(tag_item)
+                    if del_file(f_n):
+                        tag_files.remove(tag_item)
         update_tag()
-        refresh([])
+        refresh()
     else:
         Messagebox.show_info(
             message="There is no tagged file or directory.", title="Info"
         )
 
 def wrap_del(event):  # wrapper for delete keybind
-    del_file_popup(None)
+    del_file_popup()
 
 
-def del_file(file_name:str):
+def del_file(file_name: str):
     if not file_name:
-        file_name = os.getcwd() + "/" + selectedItem
-    if os.path.isfile(file_name):
-        os.remove(file_name)
-    elif os.path.isdir(file_name):
-        # os.rmdir(os.getcwd() + "/" + selectedItem)
-        shutil.rmtree(file_name)
+        file_name = os.path.join(os.getcwd(), selectedItem)
+    try:
+        send2trash(os.path.abspath(file_name))
+        return True
+    except OSError as error:
+        Messagebox.show_error(message=str(error), title="Unable to move to Trash")
+        return False
 
 
 def read_tag():
@@ -1001,7 +1000,7 @@ def main():
 
     create_widgets(root)
     read_tag()
-    refresh([])
+    refresh()
     root.mainloop()
 
 
